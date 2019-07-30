@@ -12,14 +12,14 @@ def _to_numpy(hinput):
         if hinput[0].size != hinput[1].size - 1:
             raise ValueError("Counts array and binning array are incompatible in tuple %r" % hinput)
         return hinput
-    elif str(type(hinput)) == "<class 'ROOT.TH1D'>":
-        sumw = np.zeros(hinput.GetNBinsX())
+    elif str(type(hinput)) == "<class 'ROOT.TH1F'>":
+        sumw = np.zeros(hinput.GetNbinsX())
         binning = np.zeros(sumw.size + 1)
         name = hinput.GetName()
-        for i in range(1, sumw.size + 1):
-            sumw[i] = hinput.GetBinContent(i)
-            binning[i] = hinput.GetXaxis().GetBinLowEdge(i)
-        binning[i+1] = hinput.GetXaxis().GetBinUpEdge(i)
+        for i in range(0, sumw.size):
+            sumw[i] = hinput.GetBinContent(i+1)
+            binning[i] = hinput.GetXaxis().GetBinLowEdge(i+1)
+        binning[i+1] = hinput.GetXaxis().GetBinUpEdge(i+1)
         return (sumw, binning, name)
     elif str(type(hinput)) == "<class 'coffea.hist.hist_tools.Hist'>":
         sumw = hinput.values()[()]
