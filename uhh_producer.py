@@ -1,5 +1,6 @@
 import rhalphalib as rl
 import numpy as np
+import sys
 from ROOT import TFile, TH1F
 def uhh_producer(configs=None):
     if('ModelName' not in configs):
@@ -144,7 +145,6 @@ def uhh_producer(configs=None):
     # with open("model.pkl", "wb") as fout:
     #     pickle.dump(model, fout)
 
-    import sys
     print("ROOT used? ", 'ROOT' in sys.modules)
     model.renderCombine(ModelName)
     print("ROOT used? ", 'ROOT' in sys.modules)
@@ -152,9 +152,9 @@ def uhh_producer(configs=None):
 
 if __name__ == '__main__':
     import json
-    configs=json.load(open('WMass.json'))
+    configs=json.load(open(sys.argv[1]))
     uhh_producer(configs)
     from runFit import runFits
-    runFits([configs['ModelName']])
+    runFits([configs['ModelName']],configs['pathCMSSW'])
     # for modelName in ['UHH_Model_0','UHH_Model_1','UHH_Model_2']:
     #     uhh_producer(channels,ModelName=modelName)
