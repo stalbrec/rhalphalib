@@ -25,12 +25,14 @@ class BernsteinPoly(object):
             self._dim_names = dim_names
         else:
             self._dim_names = ['dim%d' % i for i in range(len(self._order))]
-        if init_params:
+        if isinstance(init_params, np.ndarray):
             if init_params.shape != self._shape:
                 raise ValueError
             self._init_params = init_params
-        else:
+        elif init_params is None:
             self._init_params = np.ones(shape=self._shape)
+        else:
+            raise ValueError
 
         # Construct Bernstein matrix for each dimension
         self._bmatrices = []
@@ -72,12 +74,16 @@ class BernsteinPoly(object):
             xpow = np.power.outer(x, np.arange(n + 1))
             bpolyval = np.einsum("vl,xl,x...->x...v", B, xpow, bpolyval)
 
-        # Multiply by our coefficients and reduce to scalar
-        out = (bpolyval * self._params).reshape(len(xvals[0]), -1).sum(axis=1)
+        coefficients = bpolyval.reshape(len(xvals[0]), -1)
+        parameters = self._params.reshape(-1)
 
-        # Label it nicely
-        for i, p in enumerate(out):
+        out = np.full(len(xvals[0]), None)
+        for i in range(len(xvals[0])):
+            # sum small coefficients first
+            order = np.argsort(coefficients[i])
+            p = np.sum(parameters[order]*coefficients[i][order])
             dimstr = '_'.join('%s%.3f' % (d, v[i]) for d, v in zip(self._dim_names, xvals))
             p.name = self.name + '_eval_' + dimstr.replace('.', 'p')
             p.intermediate = False
+            out[i] = p
         return out.reshape(shape)
