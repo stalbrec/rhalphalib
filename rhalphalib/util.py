@@ -12,14 +12,14 @@ def _to_numpy(hinput):
         if hinput[0].size != hinput[1].size - 1:
             raise ValueError("Counts array and binning array are incompatible in tuple %r" % hinput)
         return hinput
-    elif str(type(hinput)) == "<class 'ROOT.TH1F'>":
+    elif "<class 'ROOT.TH1" in str(type(hinput)):
         sumw = np.zeros(hinput.GetNbinsX())
         binning = np.zeros(sumw.size + 1)
         name = hinput.GetName()
-        for i in range(0, sumw.size):
-            sumw[i] = hinput.GetBinContent(i+1)
-            binning[i] = hinput.GetXaxis().GetBinLowEdge(i+1)
-        binning[i+1] = hinput.GetXaxis().GetBinUpEdge(i+1)
+        for i in range(1, sumw.size + 1):
+            sumw[i-1] = hinput.GetBinContent(i)
+            binning[i-1] = hinput.GetXaxis().GetBinLowEdge(i)
+        binning[i] = hinput.GetXaxis().GetBinUpEdge(i)
         return (sumw, binning, name)
     elif str(type(hinput)) == "<class 'coffea.hist.hist_tools.Hist'>":
         sumw = hinput.values()[()]
@@ -37,6 +37,15 @@ def _to_TH1(sumw, binning, name):
     for i, w in enumerate(sumw):
         h.SetBinContent(i + 1, w)
     return h
+
+
+def _pairwise_sum(array):
+    if len(array) == 1:
+        return array[0]
+    elif len(array) % 2 != 0:
+        # would be better to pick pseudorandom elements to merge
+        array = np.append(array[:-2], array[-2] + array[-1])
+    return _pairwise_sum(array[0::2] + array[1::2])
 
 
 ROOFIT_HELPERS_INSTALLED = False
@@ -108,13 +117,13 @@ def install_roofit_helpers():
 
     _ROOT.RooAbsCollection.assign = _RooAbsCollection_assign
 
-    def _RooArgList_fromiter(iterable, silent=False):
-        items = _ROOT.RooArgList()
+    def _RooArgList_fromiter(cls, iterable, silent=False):
+        items = cls()
         for item in iterable:
             items.add(item, silent)
         return items
 
-    _ROOT.RooArgList.fromiter = _RooArgList_fromiter
+    _ROOT.RooArgList.fromiter = classmethod(_RooArgList_fromiter)
 
     def _RooAbsReal__add__(self, other):
         '''

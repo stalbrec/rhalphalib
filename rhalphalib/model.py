@@ -81,7 +81,7 @@ class Model(object):
             fout.write("text2workspace.py %s_combined.txt\n" % self.name)
 
 
-class Channel():
+class Channel(object):
     """
     Channel -> Sample
     """
@@ -95,7 +95,9 @@ class Channel():
         self._mask = None
 
     def __getitem__(self, key):
-        return self._samples[key]
+        if key in self._samples:
+            return self._samples[key]
+        return self._samples[self.name + '_' + key]
 
     def __iter__(self):
         for item in self._samples.values():
@@ -112,7 +114,7 @@ class Channel():
         if sample.name[:sample.name.find('_')] != self.name:
             raise ValueError("Naming convention requires begining of sample %r name to be %s" % (sample, self.name))
         if self._observable is not None:
-            if sample.observable != self._observable:
+            if not sample.observable == self._observable:
                 raise ValueError("Sample %r has an incompatible observable with channel %r" % (sample, self))
             sample.observable = self._observable
         else:
@@ -131,7 +133,7 @@ class Channel():
         sumw, binning, obs_name = _to_numpy(obs)
         observable = Observable(obs_name, binning)
         if self._observable is not None:
-            if observable != self._observable:
+            if not observable == self._observable:
                 raise ValueError("Observation has an incompatible observable with channel %r" % self)
         else:
             self._observable = observable
@@ -247,13 +249,24 @@ class Channel():
             table.append(['process'] + [s.name[s.name.find('_')+1:] for s in signalSamples + bkgSamples])
             table.append(['process'] + [str(i) for i in range(1 - nSig, nBkg + 1)])
             table.append(['rate'] + ["%.3f" % s.combineNormalization() for s in signalSamples + bkgSamples])
+
+            # if a param with prior does not have any effect here, the effect must be embedded in a sample PDF
+            # in that case, we declare it as 'param' later in the card
+            nuisancesNoCardEffect = []
             for param in nuisanceParams:
-                table.append([param.name + ' ' + param.combinePrior] + [s.combineParamEffect(param) for s in signalSamples + bkgSamples])
+                effects = [s.combineParamEffect(param) for s in signalSamples + bkgSamples]
+                if all(e == '-' for e in effects):
+                    nuisancesNoCardEffect.append(param)
+                else:
+                    table.append([param.name + ' ' + param.combinePrior] + effects)
 
             colWidths = [max(len(table[row][col]) + 1 for row in range(len(table))) for col in range(nSig + nBkg + 1)]
             rowfmt = ("{:<%d}" % colWidths[0]) + " ".join("{:>%d}" % w for w in colWidths[1:]) + "\n"
             for row in table:
                 fout.write(rowfmt.format(*row))
+
+            for param in nuisancesNoCardEffect:
+                fout.write("{0} param 0 1\n".format(param.name))
 
             for param in otherParams:
                 fout.write("{0} extArg {1}.root:{1}\n".format(param.name, workspaceName))
