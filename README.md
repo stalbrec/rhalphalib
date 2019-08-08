@@ -27,7 +27,7 @@ There is a python 3 compatible standalone fork of combine [available](https://gi
 It is also possible to render the model folder using the quickstart recipe, and then move the folder or switch
 environments to a CMSSW+combine environment and proceed from there.
 
-## Setup 
+## Setup
   * Rhalphalib environment:
   ```bash
   mkdir DAZSLE/rhalphabet
@@ -37,7 +37,7 @@ environments to a CMSSW+combine environment and proceed from there.
   wget https://raw.githubusercontent.com/DryRun/coffeandbacon/master/env_lcg.sh
   source setup_lcg.sh
   (source env_lcg.sh)
-  git clone git@github.com:DryRun/rhalphalib.git
+  git clone git@github.com:stalbrec/rhalphalib.git
   cd rhalphalib
   python test_rhalphabet.py
   ```
@@ -59,3 +59,14 @@ environments to a CMSSW+combine environment and proceed from there.
   source build.sh
   combine -M FitDiagnostics testModel_combined.txt --plots
   ```
+
+## UHH producer
+The producer script reads the model from a .json file, builds data cards and runs combine.
+Also paths to the combine installation, root files and a 2D grid are taken from the .json.
+The grid is created before running the analysis code containing the bins in pt and eta that are used to vary PF particles.
+There is one grid per particle category (charged, neutral,...). This way the nuisance parameters are constructed consistently with the varied histograms. If QCD is part of the given samples, rhalphabet takes care of the the background estimation in the pass region.
+
+How to run:
+```bash
+python uhh_producer.py Model.json
+```
