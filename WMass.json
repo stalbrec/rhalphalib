@@ -1,5 +1,5 @@
 {
-  "ModelName":"WMass_Model",
+  "ModelName":"WMassModel",
   "gridHistFileName":"/afs/desy.de/user/a/albrechs/xxl/af-cms/UHH2/10_2/CMSSW_10_2_10/src/UHH2/JetMass/Histograms/grid.root",
   "pathCMSSW":"/afs/desy.de/user/a/albrechs/xxl/af-cms/dazsle/CMSSW_8_1_0",
   "channels":{
@@ -32,7 +32,7 @@
       "histDir":"JetMass_Tau21DDT_pt800To1200",
       "samples":["QCD","WUnmatched","WMatched"],
       "signal":"WMatched",
-      "obs":"Pseudo",
+      "obs":"Data",
       "regions":["pass","fail"]
     }
   }
