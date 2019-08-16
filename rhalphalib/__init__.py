@@ -10,13 +10,13 @@ from .sample import (
 )
 from .parameter import (
     Observable,
-    ConstantParameter,
     NuisanceParameter,
     IndependentParameter,
     DependentParameter,
 )
 from .function import (
     BernsteinPoly,
+    DecorrelatedNuisanceVector,
 )
 
 __all__ = [
@@ -27,9 +27,9 @@ __all__ = [
     'ParametericSample',
     'TransferFactorSample',
     'Observable',
-    'ConstantParameter',
     'NuisanceParameter',
     'IndependentParameter',
     'DependentParameter',
     'BernsteinPoly',
+    'DecorrelatedNuisanceVector',
 ]

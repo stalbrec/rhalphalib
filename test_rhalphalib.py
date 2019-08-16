@@ -3,6 +3,8 @@ import rhalphalib as rl
 import numpy as np
 import scipy.stats
 import pickle
+import ROOT
+rl.util.install_roofit_helpers()
 
 
 def expo_sample(norm, scale, obs):
@@ -16,7 +18,7 @@ def gaus_sample(norm, loc, scale, obs):
 
 
 def dummy_rhalphabet():
-    model = rl.Model("testModel")
+    throwPoisson = False
 
     jec = rl.NuisanceParameter('CMS_jec', 'lnN')
     massScale = rl.NuisanceParameter('CMS_msdScale', 'shape')
@@ -30,17 +32,73 @@ def dummy_rhalphabet():
     msd = rl.Observable('msd', msdbins)
 
     # here we derive these all at once with 2D array
-    ptpts, msdpts = np.meshgrid(ptbins[:-1] + 0.3 * np.diff(ptbins), msdbins[:-1] + 0.3 * np.diff(msdbins), indexing='ij')
+    ptpts, msdpts = np.meshgrid(ptbins[:-1] + 0.3 * np.diff(ptbins), msdbins[:-1] + 0.5 * np.diff(msdbins), indexing='ij')
     rhopts = 2*np.log(msdpts/ptpts)
     ptscaled = (ptpts - 450.) / (1200. - 450.)
     rhoscaled = (rhopts - (-6)) / ((-2.1) - (-6))
     validbins = (rhoscaled >= 0) & (rhoscaled <= 1)
     rhoscaled[~validbins] = 1  # we will mask these out later
 
-    order = (2, 2)
-    initial = np.full((order[0] + 1, order[1] + 1), 1.)
-    tf = rl.BernsteinPoly("qcd_pass_rhalphTF", order, ['pt', 'rho'], initial, limits=(0, 10))
-    tf_params = tf(ptscaled, rhoscaled)
+    # Build qcd MC pass+fail model and fit to polynomial
+    qcdmodel = rl.Model("qcdmodel")
+    qcdpass, qcdfail = 0., 0.
+    for ptbin in range(npt):
+        failCh = rl.Channel("ptbin%d%s" % (ptbin, 'fail'))
+        passCh = rl.Channel("ptbin%d%s" % (ptbin, 'pass'))
+        qcdmodel.addChannel(failCh)
+        qcdmodel.addChannel(passCh)
+        # mock template
+        ptnorm = 1
+        failTempl = expo_sample(norm=ptnorm*1e5, scale=40, obs=msd)
+        passTempl = expo_sample(norm=ptnorm*1e3, scale=40, obs=msd)
+        failCh.setObservation(failTempl)
+        passCh.setObservation(passTempl)
+        qcdfail += failCh.getObservation().sum()
+        qcdpass += passCh.getObservation().sum()
+
+    qcdeff = qcdpass / qcdfail
+    tf_MCtempl = rl.BernsteinPoly("tf_MCtempl", (2, 2), ['pt', 'rho'], limits=(0, 10))
+    tf_MCtempl_params = qcdeff * tf_MCtempl(ptscaled, rhoscaled)
+    for ptbin in range(npt):
+        failCh = qcdmodel['ptbin%dfail' % ptbin]
+        passCh = qcdmodel['ptbin%dpass' % ptbin]
+        failObs = failCh.getObservation()
+        qcdparams = np.array([rl.IndependentParameter('qcdparam_ptbin%d_msdbin%d' % (ptbin, i), 0) for i in range(msd.nbins)])
+        sigmascale = 10.
+        scaledparams = failObs * (1 + sigmascale/np.maximum(1., np.sqrt(failObs)))**qcdparams
+        fail_qcd = rl.ParametericSample('ptbin%dfail_qcd' % ptbin, rl.Sample.BACKGROUND, msd, scaledparams)
+        failCh.addSample(fail_qcd)
+        pass_qcd = rl.TransferFactorSample('ptbin%dpass_qcd' % ptbin, rl.Sample.BACKGROUND, tf_MCtempl_params[ptbin, :], fail_qcd)
+        passCh.addSample(pass_qcd)
+
+        failCh.mask = validbins[ptbin]
+        passCh.mask = validbins[ptbin]
+
+    qcdfit_ws = ROOT.RooWorkspace('qcdfit_ws')
+    simpdf, obs = qcdmodel.renderRoofit(qcdfit_ws)
+    qcdfit = simpdf.fitTo(obs,
+                          ROOT.RooFit.Extended(True),
+                          ROOT.RooFit.SumW2Error(True),
+                          ROOT.RooFit.Strategy(2),
+                          ROOT.RooFit.Save(),
+                          ROOT.RooFit.Minimizer('Minuit2', 'migrad'),
+                          ROOT.RooFit.PrintLevel(-1),
+                          )
+    qcdfit_ws.add(qcdfit)
+    qcdfit_ws.writeToFile('qcdfit.root')
+    if qcdfit.status() != 0:
+        raise RuntimeError('Could not fit qcd')
+
+    param_names = [p.name for p in tf_MCtempl.parameters.reshape(-1)]
+    decoVector = rl.DecorrelatedNuisanceVector.fromRooFitResult(tf_MCtempl.name + '_deco', qcdfit, param_names)
+    tf_MCtempl.parameters = decoVector.correlated_params.reshape(tf_MCtempl.parameters.shape)
+    tf_MCtempl_params_final = tf_MCtempl(ptscaled, rhoscaled)
+    tf_dataResidual = rl.BernsteinPoly("tf_dataResidual", (2, 2), ['pt', 'rho'], limits=(0, 10))
+    tf_dataResidual_params = tf_dataResidual(ptscaled, rhoscaled)
+    tf_params = qcdeff * tf_MCtempl_params_final * tf_dataResidual_params
+
+    # build actual fit model now
+    model = rl.Model("testModel")
 
     for ptbin in range(npt):
         for region in ['pass', 'fail']:
@@ -54,13 +112,10 @@ def dummy_rhalphabet():
                 'zqq': gaus_sample(norm=ptnorm*(200 if isPass else 100), loc=91, scale=8, obs=msd),
                 'tqq': gaus_sample(norm=ptnorm*(40 if isPass else 80), loc=150, scale=20, obs=msd),
                 'hqq': gaus_sample(norm=ptnorm*(20 if isPass else 5), loc=125, scale=8, obs=msd),
-                'qcd': expo_sample(norm=ptnorm*(1e3 if isPass else 1e4), scale=40, obs=msd),
             }
-            notqcdsum = np.zeros(msd.nbins)
             for sName in ['zqq', 'wqq', 'tqq', 'hqq']:
                 # some mock expectations
                 templ = templates[sName]
-                notqcdsum += templ[0]
                 stype = rl.Sample.SIGNAL if sName == 'hqq' else rl.Sample.BACKGROUND
                 sample = rl.TemplateSample(ch.name + '_' + sName, stype, templ)
 
@@ -76,8 +131,18 @@ def dummy_rhalphabet():
 
                 ch.addSample(sample)
 
-            # make up a data_obs
-            data_obs = (templates['qcd'][0] + notqcdsum, msd.binning, msd.name)
+            # make up a data_obs, with possibly different yield values
+            templates = {
+                'wqq': gaus_sample(norm=ptnorm*(100 if isPass else 300), loc=80, scale=8, obs=msd),
+                'zqq': gaus_sample(norm=ptnorm*(200 if isPass else 100), loc=91, scale=8, obs=msd),
+                'tqq': gaus_sample(norm=ptnorm*(40 if isPass else 80), loc=150, scale=20, obs=msd),
+                'hqq': gaus_sample(norm=ptnorm*(20 if isPass else 5), loc=125, scale=8, obs=msd),
+                'qcd': expo_sample(norm=ptnorm*(1e3 if isPass else 1e5), scale=40, obs=msd),
+            }
+            yields = sum(tpl[0] for tpl in templates.values())
+            if throwPoisson:
+                yields = np.random.poisson(yields)
+            data_obs = (yields, msd.binning, msd.name)
             ch.setObservation(data_obs)
 
             # drop bins outside rho validity
@@ -85,21 +150,6 @@ def dummy_rhalphabet():
             # blind bins 11, 12, 13
             # mask[11:14] = False
             ch.mask = mask
-
-    # compute overall qcd efficiency (to scale transfer factor close to 1)
-    qcdpass, qcdfail = 0., 0.
-    for ptbin in range(npt):
-        failCh = model['ptbin%dfail' % ptbin]
-        passCh = model['ptbin%dpass' % ptbin]
-        qcdfail += failCh.getObservation().sum()
-        for sample in failCh:
-            qcdfail -= sample.getExpectation(nominal=True).sum()
-        qcdpass += passCh.getObservation().sum()
-        for sample in passCh:
-            qcdpass -= sample.getExpectation(nominal=True).sum()
-
-    qcdeff = qcdpass / qcdfail
-    tf_params = tf_params * qcdeff
 
     for ptbin in range(npt):
         failCh = model['ptbin%dfail' % ptbin]
@@ -136,9 +186,7 @@ def dummy_rhalphabet():
             'tqq': gaus_sample(norm=10*(30 if isPass else 60), loc=150, scale=20, obs=msd),
             'qcd': expo_sample(norm=10*(5e2 if isPass else 1e3), scale=40, obs=msd),
         }
-        templSum = np.zeros(msd.nbins)
         for sName, templ in templates.items():
-            templSum += templ[0]
             stype = rl.Sample.BACKGROUND
             sample = rl.TemplateSample(ch.name + '_' + sName, stype, templ)
 
@@ -149,7 +197,14 @@ def dummy_rhalphabet():
             ch.addSample(sample)
 
         # make up a data_obs
-        data_obs = (templSum, msd.binning, msd.name)
+        templates = {
+            'tqq': gaus_sample(norm=10*(30 if isPass else 60), loc=150, scale=20, obs=msd),
+            'qcd': expo_sample(norm=10*(5e2 if isPass else 1e3), scale=40, obs=msd),
+        }
+        yields = sum(tpl[0] for tpl in templates.values())
+        if throwPoisson:
+            yields = np.random.poisson(yields)
+        data_obs = (yields, msd.binning, msd.name)
         ch.setObservation(data_obs)
 
     tqqpass = model['muonCRpass_tqq']

@@ -2,14 +2,13 @@ import numpy as np
 import numbers
 from .parameter import (
     Parameter,
-    ConstantParameter,
     IndependentParameter,
     NuisanceParameter,
     DependentParameter,
     SmoothStep,
     Observable,
 )
-from .util import _to_numpy, _to_TH1, _pairwise_sum
+from .util import _to_numpy, _to_TH1, _pairwise_sum, install_roofit_helpers
 
 
 class Sample(object):
@@ -198,20 +197,35 @@ class TemplateSample(Sample):
         if nominal:
             return nominalval
         else:
-            out = np.array([ConstantParameter(self.name + "_bin%d_nominal" % i, v) for i, v in enumerate(nominalval)])
-            # TODO: additive and multiplicative effects? Or restrict to multiplicative only?
+            out = np.array([IndependentParameter(self.name + "_bin%d_nominal" % i, v, constant=True) for i, v in enumerate(nominalval)])
             for param in self.parameters:
                 effect_up = self.getParamEffect(param, up=True)
                 if effect_up is None:
-                    pass
-                if isinstance(effect_up, DependentParameter):
+                    continue
+                elif isinstance(effect_up, DependentParameter):
                     out = out * effect_up
-                if self._paramEffectsDown[param] is None:
-                    out = out * (effect_up**param)
+                elif self._paramEffectsDown[param] is None:
+                    if param.combinePrior == 'shape':
+                        out = out * (1 + effect_up*param)
+                    elif param.combinePrior == 'shapeN':
+                        out = out * (effect_up**param)
+                    elif param.combinePrior == 'lnN':
+                        # TODO: ensure scalar effect
+                        out = out * (effect_up**param)
+                    else:
+                        raise NotImplementedError('per-bin effects for other nuisance parameter types')
                 else:
                     effect_down = self.getParamEffect(param, up=False)
                     smoothStep = SmoothStep(param)
-                    combined_effect = smoothStep * (effect_up**param) + (1 - smoothStep) * (effect_down**param)
+                    if param.combinePrior == 'shape':
+                        combined_effect = smoothStep * (1 + effect_up*param) + (1 - smoothStep) * (1 + effect_down*param)
+                    elif param.combinePrior == 'shapeN':
+                        combined_effect = smoothStep * (effect_up**param) + (1 - smoothStep) * (effect_down**param)
+                    elif param.combinePrior == 'lnN':
+                        # TODO: ensure scalar effect
+                        combined_effect = smoothStep * (effect_up**param) + (1 - smoothStep) * (effect_down**param)
+                    else:
+                        raise NotImplementedError('per-bin effects for other nuisance parameter types')
                     out = out * combined_effect
 
             return out
@@ -222,29 +236,41 @@ class TemplateSample(Sample):
         and return an extended pdf representing this sample's prediciton for pdf and norm.
         '''
         import ROOT
-        rooObservable = self.observable.renderRoofit(workspace)
-        nominal = self.getExpectation(nominal=True)
-        rooTemplate = ROOT.RooDataHist(self.name, self.name, ROOT.RooArgList(rooObservable), _to_TH1(nominal, self.observable.binning, self.observable.name))
-        workspace.add(rooTemplate)
-        for param in self.parameters:
-            effect_up = self.getParamEffect(param, up=True)
-            if 'shape' not in param.combinePrior:
-                # Normalization systematics can just go into combine datacards (although if we build PDF here, will need it)
-                if isinstance(effect_up, DependentParameter):
-                    # this is a rateParam, we should add the IndependentParameter to the workspace
-                    param.renderRoofit(workspace)
-                continue
-            name = self.name + '_' + param.name + 'Up'
-            shape = nominal * effect_up
-            rooTemplate = ROOT.RooDataHist(name, name, ROOT.RooArgList(rooObservable), _to_TH1(shape, self.observable.binning, self.observable.name))
+        install_roofit_helpers()
+        normName = self.name + '_norm'
+        rooShape = workspace.pdf(self.name)
+        rooNorm = workspace.function(normName)
+        if rooShape == None and rooNorm == None:  # noqa: E711
+            rooObservable = self.observable.renderRoofit(workspace)
+            nominal = self.getExpectation(nominal=True)
+            rooTemplate = ROOT.RooDataHist(self.name, self.name, ROOT.RooArgList(rooObservable), _to_TH1(nominal, self.observable.binning, self.observable.name))
             workspace.add(rooTemplate)
-            name = self.name + '_' + param.name + 'Down'
-            shape = nominal * self.getParamEffect(param, up=False)
-            rooTemplate = ROOT.RooDataHist(name, name, ROOT.RooArgList(rooObservable), _to_TH1(shape, self.observable.binning, self.observable.name))
-            workspace.add(rooTemplate)
+            for param in self.parameters:
+                effect_up = self.getParamEffect(param, up=True)
+                if 'shape' not in param.combinePrior:
+                    # Normalization systematics can just go into combine datacards (although if we build PDF here, will need it)
+                    if isinstance(effect_up, DependentParameter):
+                        # this is a rateParam, we should add the IndependentParameter to the workspace
+                        param.renderRoofit(workspace)
+                    continue
+                name = self.name + '_' + param.name + 'Up'
+                shape = nominal * effect_up
+                rooTemplate = ROOT.RooDataHist(name, name, ROOT.RooArgList(rooObservable), _to_TH1(shape, self.observable.binning, self.observable.name))
+                workspace.add(rooTemplate)
+                name = self.name + '_' + param.name + 'Down'
+                shape = nominal * self.getParamEffect(param, up=False)
+                rooTemplate = ROOT.RooDataHist(name, name, ROOT.RooArgList(rooObservable), _to_TH1(shape, self.observable.binning, self.observable.name))
+                workspace.add(rooTemplate)
 
-        # TODO build the pdf from the data hist, maybe or maybe not with systematics, return pdf and normalization
-        return None, None
+            rooShape = ROOT.RooHistPdf(self.name, self.name, ROOT.RooArgSet(rooObservable), workspace.data(self.name))
+            workspace.add(rooShape)
+            rooNorm = IndependentParameter(normName, nominal.sum(), constant=True).renderRoofit(workspace)
+            # TODO build the pdf with systematics
+        elif rooShape == None or rooNorm == None:  # noqa: E711
+            raise RuntimeError('Sample %r has either a shape or norm already embedded in workspace %r' % (self, workspace))
+        rooShape = workspace.pdf(self.name)
+        rooNorm = workspace.function(self.name + '_norm')
+        return rooShape, rooNorm
 
     def combineNormalization(self):
         return self.getExpectation(nominal=True).sum()
@@ -376,7 +402,7 @@ class ParametericSample(Sample):
         '''
         out = self._nominal.copy()  # this is a shallow copy
         if self.mask is not None:
-            out[~self.mask] = [ConstantParameter("masked", 0) for _ in range((~self.mask).sum())]
+            out[~self.mask] = [IndependentParameter("masked", 0, constant=True) for _ in range((~self.mask).sum())]
         if nominal:
             return np.array([p.value for p in out])
         else:
@@ -407,41 +433,49 @@ class ParametericSample(Sample):
         https://github.com/root-project/root/blob/master/roofit/roofit/src/RooParametricStepFunction.cxx#L212-L213
         '''
         import ROOT
-        rooObservable = self.observable.renderRoofit(workspace)
-        params = self.getExpectation()
+        install_roofit_helpers()
+        rooShape = workspace.pdf(self.name)
+        rooNorm = workspace.function(self.name + '_norm')
+        if rooShape == None and rooNorm == None:  # noqa: E711
+            rooObservable = self.observable.renderRoofit(workspace)
+            params = self.getExpectation()
 
-        if hasattr(ROOT, 'RooParametricHist') and self.PreferRooParametricHist:
-            rooParams = [p.renderRoofit(workspace) for p in params]
-            # need a dummy hist to generate proper binning
-            dummyHist = _to_TH1(np.zeros(self.observable.nbins), self.observable.binning, self.observable.name)
-            rooTemplate = ROOT.RooParametricHist(self.name, self.name, rooObservable, ROOT.RooArgList.fromiter(rooParams), dummyHist)
-            rooNorm = ROOT.RooAddition(self.name + '_norm', self.name + '_norm', ROOT.RooArgList.fromiter(rooParams))
-            workspace.add(rooTemplate)
-            workspace.add(rooNorm)
-        else:
-            # RooParametricStepFunction expects parameters to represent PDF density (i.e. bin width normalized, and integrates to 1)
-            norm = _pairwise_sum(params)
-            norm.name = self.name + '_norm'
-            norm.intermediate = False
+            if hasattr(ROOT, 'RooParametricHist') and self.PreferRooParametricHist:
+                rooParams = [p.renderRoofit(workspace) for p in params]
+                # need a dummy hist to generate proper binning
+                dummyHist = _to_TH1(np.zeros(self.observable.nbins), self.observable.binning, self.observable.name)
+                rooShape = ROOT.RooParametricHist(self.name, self.name, rooObservable, ROOT.RooArgList.fromiter(rooParams), dummyHist)
+                rooNorm = ROOT.RooAddition(self.name + '_norm', self.name + '_norm', ROOT.RooArgList.fromiter(rooParams))
+                workspace.add(rooShape)
+                workspace.add(rooNorm)
+            else:
+                # RooParametricStepFunction expects parameters to represent PDF density (i.e. bin width normalized, and integrates to 1)
+                norm = _pairwise_sum(params)
+                norm.name = self.name + '_norm'
+                norm.intermediate = False
 
-            binw = np.diff(self.observable.binning)
-            dparams = params / binw / norm
+                binw = np.diff(self.observable.binning)
+                dparams = params / binw / norm
 
-            for p, oldp in zip(dparams, params):
-                p.name = oldp.name + "_density"
-                p.intermediate = False
+                for p, oldp in zip(dparams, params):
+                    p.name = oldp.name + "_density"
+                    p.intermediate = False
 
-            # The last bin value is defined by 1 - sum(others), so no need to render it
-            rooParams = [p.renderRoofit(workspace) for p in dparams[:-1]]
-            rooTemplate = ROOT.RooParametricStepFunction(self.name, self.name,
-                                                         rooObservable,
-                                                         ROOT.RooArgList.fromiter(rooParams),
-                                                         self.observable.binningTArrayD(),
-                                                         self.observable.nbins
-                                                         )
-            workspace.add(rooTemplate)
-            rooNorm = norm.renderRoofit(workspace)  # already rendered but we want to return it
-        return rooTemplate, rooNorm
+                # The last bin value is defined by 1 - sum(others), so no need to render it
+                rooParams = [p.renderRoofit(workspace) for p in dparams[:-1]]
+                rooShape = ROOT.RooParametricStepFunction(self.name, self.name,
+                                                          rooObservable,
+                                                          ROOT.RooArgList.fromiter(rooParams),
+                                                          self.observable.binningTArrayD(),
+                                                          self.observable.nbins
+                                                          )
+                workspace.add(rooShape)
+                rooNorm = norm.renderRoofit(workspace)  # already rendered but we want to return it
+        elif rooShape == None or rooNorm == None:  # noqa: E711
+            raise RuntimeError('Channel %r has either a shape or norm already embedded in workspace %r' % (self, workspace))
+        rooShape = workspace.pdf(self.name)
+        rooNorm = workspace.function(self.name + '_norm')
+        return rooShape, rooNorm
 
     def combineNormalization(self):
         '''

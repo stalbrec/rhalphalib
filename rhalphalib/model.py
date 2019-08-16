@@ -1,10 +1,11 @@
 from collections import OrderedDict
 import datetime
 from functools import reduce
+from itertools import chain
 import os
 import numpy as np
 from .sample import Sample
-from .parameter import Observable
+from .parameter import Observable, IndependentParameter
 from .util import _to_numpy, _to_TH1, install_roofit_helpers
 
 
@@ -19,8 +20,10 @@ class Model(object):
     def __getitem__(self, key):
         if key in self._channels:
             return self._channels[key]
-        channel = key[:key.find('_')]
-        return self[channel][key]
+        if '_' in key:
+            channel = key[:key.find('_')]
+            return self[channel][key]
+        raise KeyError
 
     def __iter__(self):
         for item in self._channels.values():
@@ -56,22 +59,57 @@ class Model(object):
         self._channels[channel.name] = channel
         return self
 
-    def renderCombine(self, outputPath):
+    def readRooFitResult(self, res):
+        '''
+        Update all independent parameters with the values given in the fit result
+        res: a RooFitResult object
+        '''
+        install_roofit_helpers()
+        params = {p.name: p for p in self.parameters if isinstance(p, IndependentParameter)}
+        for p_in in chain(res.floatParsFinal(), res.constPars()):
+            if p_in.GetName() in params:
+                p = params[p_in.GetName()]
+                p.value = p_in.getVal()
+                p.lo = p_in.getMin()
+                p.hi = p_in.getMax()
+                p.constant = p_in.isConstant()
+
+    def renderRoofit(self, workspace):
         import ROOT
         install_roofit_helpers()
+        pdfName = self.name + '_simPdf'
+        dataName = self.name + '_observation'
+        rooSimul = workspace.pdf(pdfName)
+        rooData = workspace.data(dataName)
+        if rooSimul == None and rooData == None:  # noqa: E711
+            channelCat = ROOT.RooCategory(self.name + '_channel', self.name + '_channel')
+            # TODO s+b, b-only separate?
+            rooSimul = ROOT.RooSimultaneous(self.name + '_simPdf', self.name + '_simPdf', channelCat)
+            obsmap = ROOT.std.map('string, RooDataHist*')()
+            for channel in self:
+                channelCat.defineType(channel.name)
+                pdf, obs = channel.renderRoofit(workspace)
+                rooSimul.addPdf(pdf, channel.name)
+                # const string magic: https://root.cern.ch/phpBB3/viewtopic.php?f=15&t=16882&start=15#p86985
+                obsmap.insert(ROOT.std.pair('const string, RooDataHist*')(channel.name, obs))
+
+            workspace.add(rooSimul)
+            rooObservable = ROOT.RooArgList(channel.observable.renderRoofit(workspace))
+            # that's right I don't need no CombDataSetFactory
+            rooData = ROOT.RooDataHist(self.name + '_observation', 'Combined observation', rooObservable, channelCat, obsmap)
+            workspace.add(rooData)
+        elif rooSimul == None or rooData == None:  # noqa: E711
+            raise RuntimeError('Model %r has a pdf or dataset already embedded in workspace %r' % (self, workspace))
+        rooSimul = workspace.pdf(pdfName)
+        rooData = workspace.data(dataName)
+        return rooSimul, rooData
+
+    def renderCombine(self, outputPath):
+        import ROOT
         if not os.path.exists(outputPath):
             os.makedirs(outputPath)
         workspace = ROOT.RooWorkspace(self.name)
-
-        # TODO: build RooSimultaneus from channels here
-        pdfs = []
-        for channel in self:
-            channelpdf = channel.renderRoofit(workspace)
-            pdfs.append(channelpdf)
-
-        # simul = ROOSimultaneuous(...)
-        # workspace.add(simul)
-
+        self.renderRoofit(workspace)
         workspace.writeToFile(os.path.join(outputPath, "%s.root" % self.name))
         for channel in self:
             channel.renderCard(os.path.join(outputPath, "%s.txt" % channel.name), self.name)
@@ -97,7 +135,9 @@ class Channel(object):
     def __getitem__(self, key):
         if key in self._samples:
             return self._samples[key]
-        return self._samples[self.name + '_' + key]
+        elif self.name + '_' + key in self._samples:
+            return self._samples[self.name + '_' + key]
+        raise KeyError
 
     def __iter__(self):
         for item in self._samples.values():
@@ -204,23 +244,29 @@ class Channel(object):
         Also render the observation
         '''
         import ROOT
-        # TODO: build RooAddPdf from sample pdfs (and norms)
-        pdfs = []
-        norms = []
-        for sample in self:
-            pdf, norm = sample.renderRoofit(workspace)
-            pdfs.append(pdf)
-            norms.append(norm)
+        install_roofit_helpers()
+        dataName = self.name + '_data_obs'  # combine convention
+        rooPdf = workspace.pdf(self.name)
+        rooData = workspace.data(dataName)
+        if rooPdf == None and rooData == None:  # noqa: E711
+            pdfs = []
+            norms = []
+            for sample in self:
+                pdf, norm = sample.renderRoofit(workspace)
+                pdfs.append(pdf)
+                norms.append(norm)
 
-        # addpdf = ROOT.RooAddPdf(self.name, self.name, ROOT.RooArgList(pdfs)...)
-        # return addpdf
+            rooPdf = ROOT.RooAddPdf(self.name, self.name, ROOT.RooArgList.fromiter(pdfs), ROOT.RooArgList.fromiter(norms))
+            workspace.add(rooPdf)
 
-        rooObservable = self.observable.renderRoofit(workspace)
-        name = self.name + '_data_obs'  # combine convention
-        rooTemplate = ROOT.RooDataHist(name, name, ROOT.RooArgList(rooObservable), _to_TH1(self.getObservation(), self.observable.binning, self.observable.name))
-        workspace.add(rooTemplate)
-
-        return None
+            rooObservable = self.observable.renderRoofit(workspace)
+            rooData = ROOT.RooDataHist(dataName, dataName, ROOT.RooArgList(rooObservable), _to_TH1(self.getObservation(), self.observable.binning, self.observable.name))
+            workspace.add(rooData)
+        elif rooPdf == None or rooData == None:  # noqa: E711
+            raise RuntimeError('Channel %r has either a pdf or dataset already embedded in workspace %r' % (self, workspace))
+        rooPdf = workspace.pdf(self.name)
+        rooData = workspace.data(dataName)
+        return rooPdf, rooData
 
     def renderCard(self, outputFilename, workspaceName):
         observation = self.getObservation()
