@@ -1,5 +1,8 @@
 __pycache__
 *.pyc
+.ipynb_checkpoints
+.eggs
+*.egg-info
 */*
 *.pkl
 *.root
